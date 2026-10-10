@@ -493,7 +493,7 @@ function perGuestCost() {
   return pg * region().m;
 }
 
-const COLORS = { venue: '#c62f35', food: '#e0555c', photos: '#f6969d', attire: '#ffc6ca', flowers: '#8a3a46', music: '#c98a93', other: '#e8dcd8' };
+const COLORS = { venue: '#d2407f', food: '#e86aa3', photos: '#f6969d', attire: '#ffc6ca', flowers: '#8e2b5c', music: '#dca3c4', other: '#e8dcd8' };
 
 // Donut chart drawn as SVG. Clicking a slice toggles that category as a priority.
 function pie(alloc) {

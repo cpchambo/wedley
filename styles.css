@@ -386,10 +386,10 @@ footer { background: #fff; }
 
 .note .link { padding: 0; display: inline; }
 
-/* ===== Brand colors: red #c62f35, pink #f6969d, blush #ffc6ca, navy #0f2742 ===== */
+/* ===== Brand colors: red #d2407f, pink #f6969d, blush #ffc6ca, navy #0f2742 ===== */
 :root {
-  --accent: #c62f35;
-  --accent-dark: #a4242a;
+  --accent: #d2407f;
+  --accent-dark: #ad2f68;
   --ink: #13233a;
   --muted: #5f6b7a;
   --ground: #fbf7f7;
@@ -405,20 +405,20 @@ footer { background: #fff; }
 .logo { color: var(--accent); }
 .eyebrow { color: var(--accent); }
 .nav-links button.on { color: var(--accent); border-bottom-color: var(--accent); }
-.nav .cta { box-shadow: 0 6px 16px -8px rgba(198, 47, 53, 0.6); }
-.primary { box-shadow: 0 8px 18px -10px rgba(198, 47, 53, 0.7); }
+.nav .cta { box-shadow: 0 6px 16px -8px rgba(210, 64, 127, 0.6); }
+.primary { box-shadow: 0 8px 18px -10px rgba(210, 64, 127, 0.7); }
 .choice.on, .chip.on { background: var(--accent); border-color: var(--accent); }
-.listing.on, .person.on { box-shadow: 0 0 0 3px rgba(198, 47, 53, 0.14); }
-.step.current { box-shadow: 0 0 0 3px rgba(198, 47, 53, 0.12), var(--shadow); }
+.listing.on, .person.on { box-shadow: 0 0 0 3px rgba(210, 64, 127, 0.14); }
+.step.current { box-shadow: 0 0 0 3px rgba(210, 64, 127, 0.12), var(--shadow); }
 .step .step-num { background: var(--accent); }
 .step.upcoming .step-num { background: #e9eef4; color: var(--muted); }
 .step.done .step-num { background: var(--navy); }
-.dash-cats .cat:focus-within { box-shadow: 0 0 0 3px rgba(198, 47, 53, 0.12); }
+.dash-cats .cat:focus-within { box-shadow: 0 0 0 3px rgba(210, 64, 127, 0.12); }
 .dash-top, .hero, .tour-head { background: linear-gradient(135deg, #0f2742 0%, #1c3a5e 100%); }
 .dash-top .eyebrow, .hero .eyebrow, .tour-head .eyebrow { color: var(--pink); }
 .dash-top .lead, .hero .lead, .tour-head .lead { color: #d6dfea; }
 .dash-top .primary, .hero .primary.gold { background: var(--accent); color: #fff; }
-.dash-top .primary:hover, .hero .primary.gold:hover { background: #d9444a; }
+.dash-top .primary:hover, .hero .primary.gold:hover { background: #e2559a; }
 .dash-top .ghost { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.3); }
 .tour-head .link { color: var(--pink); }
 .band { background: var(--navy); }
@@ -474,8 +474,8 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; background
 
 /* ===== Wedding look: soft blush and cream, serif headings, no navy. Overrides everything above. ===== */
 :root {
-  --accent: #c62f35;
-  --accent-dark: #a4242a;
+  --accent: #d2407f;
+  --accent-dark: #ad2f68;
   --ink: #3a2326;
   --muted: #8a6b70;
   --ground: #fff8f6;
@@ -485,8 +485,8 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; background
   --tint: #ffe9ea;
   --pink: #f6969d;
   --blush: #ffc6ca;
-  --dark: #5a1f2a;
-  --navy: #7a2a33;
+  --dark: #5a1f3d;
+  --navy: #7a2a55;
   --shadow: 0 1px 2px rgba(120, 50, 60, 0.05), 0 10px 30px -14px rgba(120, 50, 60, 0.22);
   --radius: 20px;
 }
@@ -522,14 +522,14 @@ h3 { font-weight: 600; font-size: 24px; }
 .hero .lead { color: var(--muted); }
 .hero .preview { border: 1px solid var(--line); }
 .tour-head .link { color: var(--accent); }
-.band { background: linear-gradient(135deg, #c62f35, #e0555c); color: #fff; }
+.band { background: linear-gradient(135deg, #d2407f, #e86aa3); color: #fff; }
 
 /* Steps and status */
-.step.done .step-num { background: #b47c85; }
+.step.done .step-num { background: #b87a9c; }
 .step.upcoming .step-num { background: #fbe7e8; color: var(--muted); }
-.avatar { background: var(--pink); color: #5a1f2a; }
+.avatar { background: var(--pink); color: #5a1f3d; }
 .bar { background: #fbe7e8; }
-.bar i.over { background: #7a2a33; }
+.bar i.over { background: #7a2a55; }
 .cal-cell.today { border-color: var(--accent); }
 .cal-day .small { color: var(--accent); }
 .badge.who { background: #fbe7e8; color: var(--accent-dark); }
