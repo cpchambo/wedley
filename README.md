@@ -19,6 +19,7 @@ Then open http://localhost:5173 in your browser. Press Ctrl + C in the terminal 
 
 ## What it does
 
+- Walkthrough: the four phase steps on the dashboard are clickable. Each opens a guided panel with that phase's tasks and the real controls inline (budget, region, priorities, guests, then each category's slider and option dropdown), with Back and Next.
 - Dashboard: once the budget is built, the home screen is one connected dashboard: money with the pie, who pays, countdown and next tasks, the six budget sliders with their option dropdowns (filter live as you drag), the smaller lines, picks with the reality check, rentals and resale, inspiration, and this month's calendar. Share it by link or Excel.
 - Helpers and agreements: add Mom, Dad or anyone. Tap what they cover, set a cap, assign tasks. Each person gets their own link that shows only their part in plain words ("catering up to $4,000 and no more") with a yes button. Anything over a cap falls back to the couple. Owners show on the calendar.
 - Business model on the landing page: free for couples; 10% + 5% on rentals, 8% vendor referral fee, and a $39 one-time Plus plan for unlimited helpers, reminders and printable agreements.

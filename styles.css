@@ -446,3 +446,19 @@ footer { background: #fff; }
 .step-num { background: var(--accent); }
 .preview .stat b, .big { color: var(--ink); }
 .photo.tone { color: var(--accent-dark); }
+
+/* Step walkthrough */
+.step { cursor: pointer; text-align: left; font-family: inherit; font-size: inherit; color: var(--ink); position: relative; }
+.step:hover { border-color: var(--line-strong); }
+.step.open { border-color: var(--accent); background: var(--tint); box-shadow: none; }
+.step-caret { margin-left: auto; color: var(--muted); font-size: 14px; }
+.steps-hint { margin-top: -16px; }
+.walk { border-color: var(--accent); padding: 24px; }
+.walk > .row > span:first-child { font-size: 19px; }
+.walk-task { padding: 10px 0; }
+.walk-task .text { font-size: 17px; }
+.walk-controls { display: flex; flex-direction: column; gap: 14px; padding: 14px 0 14px 56px; }
+.walk-cat { padding: 0 0 10px 56px; }
+.walk-cat .cat { box-shadow: none; }
+.walk-nav { padding-top: 10px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) { .walk-controls, .walk-cat { padding-left: 0; } }

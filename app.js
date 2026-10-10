@@ -105,6 +105,7 @@ const fresh = () => ({
   who: null,         // when set, this device is a helper looking at their own part
   shareWho: null,    // which helper the current share link is for
   open: {},          // budget rows with the options panel open
+  step: null,        // which phase walkthrough is open on the dashboard (0-3) or null
   resold: false,     // the couple listed their wedding gear for rent
   showOver: {},      // budget rows showing over-budget options too
   rentals: {},       // { listingId: true } booked from the marketplace
@@ -115,7 +116,7 @@ const state = fresh();
 // ---------- Saving and sharing ----------
 
 const SAVE_KEY = 'wedding-budget-proto';
-const SAVED = ['page', 'built', 'budget', 'guests', 'region', 'picks', 'cat', 'chosen', 'date', 'done', 'custom', 'imported', 'view', 'listings', 'rentals', 'market', 'people', 'who', 'resold'];
+const SAVED = ['page', 'built', 'budget', 'guests', 'region', 'picks', 'cat', 'chosen', 'date', 'done', 'custom', 'imported', 'view', 'listings', 'rentals', 'market', 'people', 'who', 'resold', 'step'];
 const snapshot = () => { const o = {}; SAVED.forEach((k) => { o[k] = state[k]; }); return o; };
 function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot())); } catch (e) { /* private window or storage off */ } }
 function shareLink(who) {
@@ -318,9 +319,9 @@ function flash() {
   return state.flash ? `<div class="note good" role="status">${state.flash}</div>` : '';
 }
 
-function catRows(alloc) {
+function catRows(alloc, only) {
   const max = round(alloc.pool, 50);
-  return CATS.map((c) => {
+  return CATS.filter((c) => !only || only.includes(c.id)).map((c) => {
     const p = pickOf(c);
     const open = !!state.open[c.id];
     return `
@@ -964,6 +965,7 @@ function dash() {
     ${state.built ? '' : `<div class="note gold">This is a sample ${money(state.budget)} wedding for ${state.guests} guests so you can see how it works. <button class="link" data-go="budget">Set your own budget, guests and priorities</button> or <button class="link" data-sample>fill it with sample picks</button>.</div>`}
     ${state.share && !state.shareWho ? `<input class="share-url" type="text" readonly value="${state.share}" aria-label="Share link" onfocus="this.select()">` : ''}
     ${steps(p.tasks)}
+    ${walkthrough(p.tasks, alloc)}
 
     <div class="dash dash-3">
       <div class="card stack">
@@ -1090,6 +1092,7 @@ function loadSample() {
   state.market = { tab: 'browse', cat: 'all', q: '' };
   state.view = 'calendar';
   state.open = { venue: true };
+  state.step = 1;
   state.chosen.photos.deposit = true;
   state.people = [
     { id: 'p-mom', name: 'Linda', role: 'Mom', cap: 4000, covers: ['food', 'cake'], tasks: ['headcount'], accepted: 'Oct 3' },
@@ -1221,10 +1224,10 @@ const TASKS = [
 
 // The big steps of planning, in order. The current phase is the first one with something left to do.
 const PHASES = [
-  { name: 'Set the budget', tasks: ['budget', 'guests'] },
-  { name: 'Book the big three', tasks: ['venue', 'photos', 'food'] },
-  { name: 'Fill in the details', tasks: ['attire', 'music', 'flowers', 'savedate', 'diy', 'invites', 'send'] },
-  { name: 'Final stretch', tasks: ['license', 'headcount', 'confirm', 'finish'] },
+  { name: 'Set the budget', tasks: ['budget', 'guests'], guide: 'Everything else depends on three numbers: your total, your guest count and where the wedding is. Pick up to three priorities and we weight the split toward them.' },
+  { name: 'Book the big three', tasks: ['venue', 'photos', 'food'], guide: 'Venue, photographer and catering take two thirds of most budgets and book up first. Drag each slider, open the options, and add one. Each pick ticks its task.' },
+  { name: 'Fill in the details', tasks: ['attire', 'music', 'flowers', 'savedate', 'diy', 'invites', 'send'], guide: 'The smaller picks, plus the paper trail. DIY options show the hours they take so you can line up helpers early.' },
+  { name: 'Final stretch', tasks: ['license', 'headcount', 'insurance', 'confirm', 'finish'], guide: 'The last month is confirmations. Give the caterer the final number, get the license, confirm every vendor, finish anything you are making yourself.' },
 ];
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -1291,13 +1294,68 @@ function steps(tasks) {
     let status = 'upcoming';
     if (all) status = 'done';
     else if (!currentSeen) { status = 'current'; currentSeen = true; }
+    const open = state.step === i;
     return `
-    <div class="step ${status}">
+    <button class="step ${status} ${open ? 'open' : ''}" data-step="${i}" aria-expanded="${open}">
       <div class="step-num">${all ? '✓' : i + 1}</div>
       <div class="step-body"><b>${p.name}</b><span class="muted small">${all ? 'Done' : `${done} of ${list.length} done`}${status === 'current' ? ' · you are here' : ''}</span></div>
-    </div>`;
+      <span class="step-caret">${open ? '▴' : '▾'}</span>
+    </button>`;
   }).join('');
-  return `<div class="steps">${items}</div>`;
+  return `<div class="steps">${items}</div>${state.step === null || state.step === undefined ? '<div class="muted small steps-hint">Click a step to walk through it.</div>' : ''}`;
+}
+
+// The walkthrough panel for one phase: its tasks, with the real controls inline, and Back / Next.
+function walkthrough(tasks, alloc) {
+  const i = state.step;
+  if (i === null || i === undefined || !PHASES[i]) return '';
+  const ph = PHASES[i];
+  const list = ph.tasks.map((id) => tasks.find((t) => t.id === id));
+  const done = list.filter((t) => t.done).length;
+  const { hours, helpers } = totals();
+  const check = (t) => `<button class="check" data-task="${t.id}" aria-pressed="${t.done}" aria-label="${t.done ? 'Mark not done' : 'Mark done'}: ${t.text}" ${t.auto ? 'disabled' : ''}>${t.done ? '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>' : ''}</button>`;
+  const taskRow = (t, extra) => `<div class="task walk-task ${t.done ? 'done' : ''}">${check(t)}<span class="text">${t.text}<span class="muted small"> · by ${fmtDate(t.due)}${ownerOf(t.id) ? ` · ${ownerOf(t.id).name}` : ''}</span></span>${t.late ? '<span class="badge over">Late</span>' : ''}${extra || ''}</div>`;
+  let body = '';
+  if (i === 0) {
+    const regions = REGIONS.map((r) => `<button class="choice chip ${state.region === r.id ? 'on' : ''}" data-region="${r.id}">${r.name}</button>`).join('');
+    const picks = CATS.map((c) => `<button class="choice chip ${isPick(c.id) ? 'on' : ''}" data-pick="${c.id}">${c.name}</button>`).join('');
+    body = `
+      ${taskRow(list[0])}
+      <div class="walk-controls">
+        <div class="field"><span>Total budget</span>${budgetInput()}</div>
+        <div class="field"><span>Where</span><div class="chips">${regions}</div></div>
+        <div class="field"><span>Priorities, up to 3</span><div class="chips">${picks}</div></div>
+        ${state.built ? '' : '<button class="primary" data-build>Lock in my budget</button>'}
+      </div>
+      ${taskRow(list[1], `<span class="stepper"><button data-guests-delta="-10" aria-label="10 fewer guests">−</button><b data-bind="guests">${state.guests}</b><button data-guests-delta="10" aria-label="10 more guests">+</button></span>`)}
+      <div class="muted small" data-bind="guestNote">${guestNote()}</div>`;
+  } else if (i === 1) {
+    body = list.map((t) => `${taskRow(t)}<div class="walk-cat">${catRows(alloc, [t.cat])}</div>`).join('');
+  } else if (i === 2) {
+    body = list.map((t) => t.cat
+      ? `${taskRow(t)}<div class="walk-cat">${catRows(alloc, [t.cat])}</div>`
+      : taskRow(t, t.id === 'diy' && hours ? `<span class="muted small">${hours} hours of DIY so far · ${helpers} helper${helpers === 1 ? '' : 's'}</span>` : t.id === 'diy' ? '<span class="muted small">Pick DIY options above and the hours add up here</span>' : '')).join('');
+  } else {
+    body = list.map((t) => taskRow(t,
+      t.id === 'headcount' ? `<span class="muted small">Current count: <b>${state.guests}</b></span>`
+      : t.id === 'insurance' ? `<span class="muted small">From about ${money(150 * region().m)}</span>`
+      : t.id === 'finish' && hours ? `<span class="muted small">${hours} hours planned</span>`
+      : t.id === 'confirm' ? `<span class="muted small">${CATS.filter((c) => state.chosen[c.id]).length} vendor${CATS.filter((c) => state.chosen[c.id]).length === 1 ? "" : "s"} to confirm</span>` : '')).join('');
+  }
+  return `
+  <div class="card stack walk" id="walk">
+    <div class="row"><span>Step ${i + 1} of ${PHASES.length}: ${ph.name}</span><span class="muted small">${done} of ${list.length} done</span></div>
+    <div class="bar"><i style="width:${Math.round((done / list.length) * 100)}%"></i></div>
+    <p class="muted">${ph.guide}</p>
+    ${body}
+    <div class="row-actions walk-nav">
+      <span>${i > 0 ? `<button class="ghost" data-step="${i - 1}">Back</button>` : ''}</span>
+      <span class="row-actions">
+        <button class="link" data-step="${i}">Close</button>
+        ${i < PHASES.length - 1 ? `<button class="primary" data-step="${i + 1}">Next: ${PHASES[i + 1].name}</button>` : '<button class="primary" data-step="3">All done, enjoy the day</button>'}
+      </span>
+    </div>
+  </div>`;
 }
 
 function taskChip(t) {
@@ -1506,7 +1564,7 @@ app.addEventListener('click', (e) => {
     else if (state.picks.length < 3) state.picks.push(d.pick);
     state.custom = null; // back to the suggested split for the new priorities
   }
-  if (d.build !== undefined) { state.built = true; state.page = 'home'; }
+  if (d.build !== undefined) { state.built = true; state.page = 'home'; if (state.step === 0) state.step = 1; }
   if (d.edit !== undefined) { state.built = false; }
   if (d.reset !== undefined) { state.custom = null; }
   if (d.resale !== undefined) {
@@ -1517,6 +1575,7 @@ app.addEventListener('click', (e) => {
   }
   if (d.deposit) { const ch = state.chosen[d.deposit]; if (ch) { ch.deposit = !ch.deposit; state.flash = ch.deposit ? `Deposit held by ${APP_NAME} until the day. The vendor pays our ${Math.round(VENDOR_FEE * 100)}% fee. You pay nothing extra.` : ''; } }
   if (d.cat) { state.cat = d.cat; }
+  if (d.step !== undefined) { const n = Number(d.step); state.step = (state.step === n && state.page === 'home' && !el.classList.contains('primary') && !el.classList.contains('ghost')) ? null : n; if (state.page !== 'home') state.page = 'home'; }
   if (d.expand) { state.open[d.expand] = !state.open[d.expand]; }
   if (d.expandOnly) { state.open[d.expandOnly] = true; }
   if (d.showOver) { state.showOver[d.showOver] = !state.showOver[d.showOver]; }
@@ -1566,6 +1625,7 @@ app.addEventListener('click', (e) => {
 
   render();
   if (d.expandOnly) { const el = app.querySelector(`[data-opts=${d.expandOnly}]`); if (el) el.scrollIntoView({ block: 'center' }); }
+  if (d.step !== undefined && state.step !== null) { const el = document.getElementById('walk'); if (el && (el.classList.contains('primary') || before !== 'home' || el.getBoundingClientRect().top < 0)) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
   if (state.page !== before || d.build !== undefined || d.edit !== undefined || d.startover !== undefined) window.scrollTo(0, 0);
 });
 
