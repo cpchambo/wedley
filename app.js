@@ -2,7 +2,7 @@
 // Everything is sample data computed in the browser. No backend, no API.
 // Progress is saved in this browser (localStorage) and can be shared by link.
 
-const APP_NAME = 'Wedley'; // put your site name here
+const APP_NAME = 'Wedly'; // put your site name here
 
 // Where the wedding is. Every price scales by this.
 const REGIONS = [
@@ -263,7 +263,7 @@ function perGuestCost() {
   return pg * region().m;
 }
 
-const COLORS = { venue: '#8e1245', food: '#c2185b', photos: '#e86a9a', attire: '#f4a6c1', flowers: '#7a5c9e', music: '#b9a3d6', other: '#d9cbd2' };
+const COLORS = { venue: '#c62f35', food: '#e0555c', photos: '#f6969d', attire: '#ffc6ca', flowers: '#0f2742', music: '#4b6b8f', other: '#d8d3d0' };
 
 // Donut chart drawn as SVG. Clicking a slice toggles that category as a priority.
 function pie(alloc) {
@@ -283,8 +283,8 @@ function pie(alloc) {
     return `<path d="M ${pt(a0, R)} A ${R} ${R} 0 ${large} 1 ${pt(a1, R)} L ${pt(a1, r)} A ${r} ${r} 0 ${large} 0 ${pt(a0, r)} Z" fill="${COLORS[p.id]}" stroke="#fff" stroke-width="${isPick(p.id) ? 5 : 2}" ${click}><title>${p.name}: ${money(alloc[p.id])} (${Math.round(frac * 100)}%)</title></path>`;
   }).join('');
   return `<svg viewBox="0 0 220 220" role="img" aria-label="Budget split by category">${paths}
-    <text x="110" y="104" text-anchor="middle" font-size="13" fill="#6b4a57">Total</text>
-    <text x="110" y="128" text-anchor="middle" font-size="21" font-weight="700" fill="#2b1420">${money(state.budget)}</text></svg>`;
+    <text x="110" y="104" text-anchor="middle" font-size="13" fill="#5f6b7a">Total</text>
+    <text x="110" y="128" text-anchor="middle" font-size="21" font-weight="700" fill="#13233a">${money(state.budget)}</text></svg>`;
 }
 
 function budgetInput() {

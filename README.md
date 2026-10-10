@@ -1,4 +1,4 @@
-# Wedley: wedding budget site prototype
+# Wedly: wedding budget site prototype
 
 A click-through prototype for class. Plain HTML, CSS and JavaScript: no install, no API, no backend. All prices are sample numbers calculated in the browser.
 
