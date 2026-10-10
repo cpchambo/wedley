@@ -106,6 +106,11 @@ const fresh = () => ({
   shareWho: null,    // which helper the current share link is for
   open: {},          // budget rows with the options panel open
   step: null,        // which phase walkthrough is open on the dashboard (0-3) or null
+  cloudCode: '',     // share code of this plan in the cloud, if synced
+  editKey: '',       // private key that lets this device edit the cloud copy
+  board: null,       // imported Pinterest board { url, title, looks }
+  importing: false,
+  importError: '',
   resold: false,     // the couple listed their wedding gear for rent
   showOver: {},      // budget rows showing over-budget options too
   rentals: {},       // { listingId: true } booked from the marketplace
@@ -116,10 +121,14 @@ const state = fresh();
 // ---------- Saving and sharing ----------
 
 const SAVE_KEY = 'wedding-budget-proto';
-const SAVED = ['page', 'built', 'budget', 'guests', 'region', 'picks', 'cat', 'chosen', 'date', 'done', 'custom', 'imported', 'view', 'listings', 'rentals', 'market', 'people', 'who', 'resold', 'step'];
+const SAVED = ['page', 'built', 'budget', 'guests', 'region', 'picks', 'cat', 'chosen', 'date', 'done', 'custom', 'imported', 'view', 'listings', 'rentals', 'market', 'people', 'who', 'resold', 'step', 'board'];
 const snapshot = () => { const o = {}; SAVED.forEach((k) => { o[k] = state[k]; }); return o; };
-function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot())); } catch (e) { /* private window or storage off */ } }
+function save() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ ...snapshot(), cloudCode: state.cloudCode, editKey: state.editKey })); } catch (e) { /* private window or storage off */ }
+  if (typeof cloud !== 'undefined') cloud.schedule();
+}
 function shareLink(who) {
+  if (state.cloudCode) return `${location.origin}${location.pathname}?plan=${state.cloudCode}${who ? `&who=${who}` : ''}`;
   const snap = snapshot();
   snap.who = who || null;
   snap.page = who ? 'helper' : 'home';
@@ -138,18 +147,238 @@ function load() {
     } catch (e) { data = null; }
   }
   if (!data) { try { data = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) { data = null; } }
-  if (data && typeof data === 'object') SAVED.forEach((k) => { if (data[k] !== undefined) state[k] = data[k]; });
+  if (data && typeof data === 'object') { SAVED.forEach((k) => { if (data[k] !== undefined) state[k] = data[k]; }); if (!shared) { state.cloudCode = data.cloudCode || ''; state.editKey = data.editKey || ''; } }
   if (shared) {
     if (state.who && personById(state.who)) { state.page = 'helper'; state.flash = ''; }
     else { state.who = null; state.page = 'home'; state.flash = 'Opened a shared plan. Changes you make here are saved on this device only.'; }
   } else if (state.who && !personById(state.who)) { state.who = null; }
 }
 
+
+// ---------- Cloud sync, Pinterest import and deposits. All off until config.js is filled in. ----------
+const CFG = window.WEDLY_CONFIG || {};
+const cloudOn = () => !!(CFG.SUPABASE_URL && CFG.SUPABASE_ANON_KEY && window.supabase);
+const pinsOn = () => !!CFG.PINTEREST_PROXY;
+const stripeOn = () => !!CFG.STRIPE_DEPOSIT_LINK;
+const randomCode = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n))).map((b) => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+
+const cloud = {
+  sb: null,
+  status: '',      // '', 'saving', 'saved', or an error message
+  timer: null,
+  poll: null,
+  init() { if (cloudOn()) this.sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY); },
+  owner() { return !!(state.cloudCode && state.editKey); },
+  async publish() {
+    if (!state.cloudCode) { state.cloudCode = randomCode(7); state.editKey = randomCode(20); }
+    const { error } = await this.sb.rpc('save_plan', { p_code: state.cloudCode, p_key: state.editKey, p_data: snapshot() });
+    if (error) throw error;
+  },
+  // Called after every local save. Waits a moment so slider drags do not spam the server.
+  schedule() {
+    if (!cloudOn() || !this.owner()) return;
+    clearTimeout(this.timer);
+    this.setStatus('saving');
+    this.timer = setTimeout(() => this.publish().then(() => this.setStatus('saved')).catch((e) => this.setStatus('could not save: ' + e.message)), 900);
+  },
+  setStatus(s) { this.status = s; app.querySelectorAll('[data-bind=cloudStatus]').forEach((el) => { el.textContent = this.statusText(); el.className = 'cloud-status ' + (s === 'saved' ? 'ok' : s === 'saving' ? '' : 'bad'); }); },
+  statusText() { return this.status === 'saved' ? 'Synced' : this.status === 'saving' ? 'Saving…' : this.status || 'Synced'; },
+  async fetchPlan(code) { const { data, error } = await this.sb.rpc('get_plan', { p_code: code }); if (error) throw error; return data; },
+  async respond(personId) {
+    const p = personById(personId);
+    if (!p) return;
+    const done = {};
+    (p.tasks || []).forEach((t) => { if (state.done[t]) done[t] = true; });
+    const { error } = await this.sb.rpc('respond', { p_code: state.cloudCode, p_person: personId, p_accepted: p.accepted || null, p_done: done });
+    if (error) throw error;
+  },
+  // The couple pulls every helper's answers and merges them in.
+  async pullResponses() {
+    const { data, error } = await this.sb.rpc('get_responses', { p_code: state.cloudCode });
+    if (error || !data) return false;
+    let changed = false;
+    data.forEach((r) => {
+      const p = personById(r.person_id);
+      if (!p) return;
+      if (r.accepted && p.accepted !== r.accepted) { p.accepted = r.accepted; changed = true; }
+      Object.keys(r.done || {}).forEach((t) => { if (r.done[t] && !state.done[t]) { state.done[t] = true; changed = true; } });
+    });
+    return changed;
+  },
+  startPolling() {
+    if (!cloudOn() || !this.owner() || this.poll) return;
+    this.poll = setInterval(async () => { if (await this.pullResponses()) render(); }, 20000);
+  },
+  // On page load: a ?plan= link replaces whatever is on this device with the cloud copy.
+  async boot() {
+    this.init();
+    const q = new URLSearchParams(location.search);
+    const code = q.get('plan');
+    if (code && cloudOn()) {
+      try {
+        const data = await this.fetchPlan(code);
+        if (data) {
+          Object.assign(state, fresh());
+          SAVED.forEach((k) => { if (data[k] !== undefined) state[k] = data[k]; });
+          state.cloudCode = code;
+          state.editKey = q.get('key') || '';
+          const who = q.get('who');
+          if (who && personById(who)) { state.who = who; state.page = 'helper'; }
+          else { state.who = null; state.page = 'home'; state.flash = state.editKey ? 'Your plan is synced to this device too.' : 'Viewing a shared plan. Edits stay on this device unless you have the private link.'; }
+          if (state.who) {
+            const { data: rs } = await this.sb.rpc('get_responses', { p_code: code });
+            const mine = (rs || []).find((r) => r.person_id === state.who);
+            if (mine) { const p = personById(state.who); if (mine.accepted) p.accepted = mine.accepted; Object.keys(mine.done || {}).forEach((t) => { if (mine.done[t]) state.done[t] = true; }); }
+          }
+        } else { state.flash = 'That plan link is not valid any more.'; }
+      } catch (e) { state.flash = 'Could not load the shared plan: ' + e.message; }
+      history.replaceState(null, '', location.pathname);
+      render();
+    }
+    if (this.owner()) { this.status = 'saved'; if (await this.pullResponses()) render(); this.startPolling(); }
+  },
+};
+
+// Pinterest: turn a board URL into priced looks using keywords in the pin titles.
+const PIN_WORDS = [
+  { cat: 'flowers', words: ['bouquet', 'floral', 'flower', 'peony', 'peonies', 'rose', 'greenery', 'eucalyptus', 'centerpiece', 'arch', 'boutonniere', 'garland'] },
+  { cat: 'decor', words: ['table', 'tablescape', 'candle', 'light', 'sign', 'backdrop', 'arch', 'linen', 'chair', 'rustic', 'boho', 'decor', 'centerpiece', 'garland', 'lantern', 'runner', 'place card', 'seating chart'] },
+  { cat: 'cake', words: ['cake', 'dessert', 'donut', 'cupcake', 'macaron', 'sweets'] },
+  { cat: 'food', words: ['dinner', 'food', 'buffet', 'catering', 'charcuterie', 'grazing', 'cocktail', 'bar', 'drink', 'taco', 'pizza', 'menu'] },
+  { cat: 'attire', words: ['dress', 'gown', 'suit', 'tux', 'veil', 'bridesmaid', 'groom', 'bridal', 'shoes', 'hair', 'makeup'] },
+  { cat: 'photos', words: ['photo', 'portrait', 'pose', 'shot', 'photography', 'engagement'] },
+  { cat: 'music', words: ['band', 'dj', 'dance', 'first dance', 'playlist', 'song'] },
+  { cat: 'venue', words: ['barn', 'venue', 'ceremony', 'outdoor', 'tent', 'backyard', 'garden', 'reception', 'aisle'] },
+  { cat: 'invites', words: ['invitation', 'invite', 'stationery', 'save the date', 'calligraphy'] },
+];
+const PIN_COST = { // pro [fixed, perGuest], diy [fixed, perGuest], hours
+  flowers: { pro: [500, 6], diy: [150, 2], hours: 6 },
+  decor: { pro: [250, 5], diy: [80, 2], hours: 5 },
+  cake: { pro: [150, 5], diy: [60, 2], hours: 6 },
+  food: { pro: [400, 40], diy: [150, 15], hours: 12 },
+  attire: { pro: [900, 0], diy: [250, 0], hours: 4 },
+  photos: { pro: [600, 0], diy: [150, 0], hours: 3 },
+  music: { pro: [700, 0], diy: [150, 0], hours: 3 },
+  venue: { pro: [1500, 10], diy: [500, 6], hours: 10 },
+  invites: { pro: [80, 3], diy: [30, 1], hours: 6 },
+};
+const TONES = ['#fde2e4', '#fbe7d6', '#f6e6ee', '#e9eef3', '#f4ecd8', '#e6efe9'];
+function pinToLook(pin, i) {
+  const t = (pin.title || '').toLowerCase();
+  let cats = PIN_WORDS.filter((w) => w.words.some((k) => t.includes(k))).map((w) => w.cat);
+  cats = [...new Set(cats)].slice(0, 2);
+  if (!cats.length) cats = ['decor'];
+  return { img: pin.img, url: pin.link, title: pin.title || 'Pinned look', tone: TONES[i % TONES.length], parts: cats.map((c) => ({ cat: c, pro: PIN_COST[c].pro, diy: PIN_COST[c].diy, hours: PIN_COST[c].hours })) };
+}
+async function importBoard(url) {
+  const r = await fetch(`${CFG.PINTEREST_PROXY.replace(/\/$/, '')}/?board=${encodeURIComponent(url)}`);
+  const j = await r.json();
+  if (!r.ok || j.error) throw new Error(j.error || 'Import failed');
+  if (!j.pins.length) throw new Error('No pins found on that board');
+  return { url, title: j.title || 'Your board', looks: j.pins.slice(0, 24).map(pinToLook) };
+}
+const currentLooks = () => (state.board && state.board.looks && state.board.looks.length ? state.board.looks : LOOKS);
+
+
+// ---------- Style matching: your board's look, matched to vendors who do that look ----------
+const STYLES = {
+  boho: ['boho', 'bohemian', 'pampas', 'macrame', 'wild', 'dried', 'desert'],
+  rustic: ['rustic', 'barn', 'wood', 'mason', 'burlap', 'farmhouse', 'country'],
+  classic: ['classic', 'elegant', 'timeless', 'ballroom', 'formal', 'black tie', 'traditional'],
+  romantic: ['romantic', 'blush', 'peony', 'peonies', 'rose', 'soft', 'dreamy', 'whimsical'],
+  garden: ['garden', 'greenery', 'eucalyptus', 'wildflower', 'outdoor', 'meadow', 'botanical', 'picnic'],
+  modern: ['modern', 'minimal', 'minimalist', 'clean', 'geometric', 'sleek', 'city', 'loft'],
+  moody: ['moody', 'dark', 'burgundy', 'candlelit', 'velvet', 'jewel', 'gothic', 'black'],
+  vintage: ['vintage', 'antique', 'lace', 'retro', 'old', 'heirloom', '70s', 'disco'],
+  coastal: ['beach', 'coastal', 'sea', 'ocean', 'nautical', 'lake'],
+};
+const STYLE_NAMES = { boho: 'Boho', rustic: 'Rustic', classic: 'Classic', romantic: 'Romantic', garden: 'Garden', modern: 'Modern', moody: 'Moody', vintage: 'Vintage', coastal: 'Coastal' };
+
+// Sample local vendors with the styles they are known for. tier maps to the option prices (1 to 3).
+const VENDORS = {
+  venue: [
+    { name: 'Hollow Oak Barn', tier: 2, styles: ['rustic', 'garden', 'boho'], known: 'string lights, open field ceremonies' },
+    { name: 'The Foundry Loft', tier: 2, styles: ['modern', 'moody', 'classic'], known: 'exposed brick, candlelit dinners' },
+    { name: 'Rosemont Gardens', tier: 3, styles: ['garden', 'romantic', 'classic'], known: 'rose walk ceremonies, tented receptions' },
+    { name: 'Lakeside Pavilion', tier: 1, styles: ['coastal', 'garden', 'rustic'], known: 'sunset photos, bring-your-own catering' },
+  ],
+  food: [
+    { name: 'Hearth & Harvest', tier: 2, styles: ['rustic', 'garden', 'boho'], known: 'family-style platters, grazing tables' },
+    { name: 'Lola\'s Taco Truck', tier: 1, styles: ['boho', 'coastal', 'vintage'], known: 'late-night tacos, agua frescas' },
+    { name: 'Maison Table', tier: 3, styles: ['classic', 'romantic', 'modern'], known: 'plated courses, champagne towers' },
+  ],
+  photos: [
+    { name: 'Juniper Lane Photo', tier: 2, styles: ['boho', 'garden', 'romantic'], known: 'film-look, golden hour, candid' },
+    { name: 'Noir Studio', tier: 3, styles: ['moody', 'modern', 'classic'], known: 'editorial, flash, black and white' },
+    { name: 'Em Rivera (student)', tier: 1, styles: ['vintage', 'romantic', 'coastal'], known: 'documentary style, disposable-camera add-on' },
+  ],
+  attire: [
+    { name: 'Thrift Bride Co.', tier: 1, styles: ['vintage', 'boho', 'romantic'], known: 'restored lace, 70s silhouettes' },
+    { name: 'Atelier Row', tier: 3, styles: ['classic', 'modern', 'romantic'], known: 'clean lines, custom veils' },
+    { name: 'Rent the Aisle', tier: 1, styles: ['classic', 'modern', 'garden'], known: 'designer rentals, suits and gowns' },
+  ],
+  flowers: [
+    { name: 'Wildstem Floral', tier: 2, styles: ['boho', 'garden', 'romantic'], known: 'wildflowers, dried pampas, loose arches' },
+    { name: 'Petal & Pine', tier: 2, styles: ['rustic', 'garden', 'classic'], known: 'greenery garlands, mason jar centerpieces' },
+    { name: 'Maison Bloom', tier: 3, styles: ['classic', 'romantic', 'modern'], known: 'white roses, peonies, full installs' },
+    { name: 'Thistle Studio', tier: 3, styles: ['moody', 'modern', 'vintage'], known: 'burgundy palettes, sculptural stems' },
+  ],
+  music: [
+    { name: 'DJ Marisol', tier: 2, styles: ['modern', 'boho', 'coastal'], known: 'open-format, sunset sets' },
+    { name: 'The Oak Street Trio', tier: 3, styles: ['classic', 'romantic', 'garden'], known: 'strings for ceremony, jazz for dinner' },
+    { name: 'Retro Hour Band', tier: 3, styles: ['vintage', 'rustic', 'moody'], known: '70s soul, disco closers' },
+  ],
+};
+
+// The couple's style profile from pin titles, strongest first. Falls back to priorities if no board.
+function styleProfile() {
+  const counts = {};
+  const looks = state.board && state.board.looks ? state.board.looks : [];
+  looks.forEach((l) => { const t = (l.title || '').toLowerCase(); Object.keys(STYLES).forEach((s) => { if (STYLES[s].some((w) => t.includes(w))) counts[s] = (counts[s] || 0) + 1; }); });
+  if (!looks.length && state.imported) { counts.garden = 3; counts.romantic = 2; counts.boho = 1; } // sample board
+  return Object.keys(counts).sort((a, b) => counts[b] - counts[a]).slice(0, 3);
+}
+
+function vendorMatches(catId) {
+  const prof = styleProfile();
+  const c = CATS.find((x) => x.id === catId);
+  return (VENDORS[catId] || []).map((v) => {
+    const hits = v.styles.filter((s) => prof.includes(s));
+    return { ...v, hits, score: hits.length, price: priceOf(c, v.tier) };
+  }).sort((a, b) => b.score - a.score || a.price - b.price);
+}
+
+function vendorCards(catId, limit) {
+  const prof = styleProfile();
+  const alloc = allocations();
+  const list = vendorMatches(catId).slice(0, limit || 4);
+  const c = CATS.find((x) => x.id === catId);
+  const p = pickOf(c);
+  return list.map((v) => `
+    <div class="card vendor ${v.score && prof.length ? 'match' : ''}">
+      <div class="stack">
+        <div class="row"><span>${v.name}</span><span class="small">${money(v.price)}</span></div>
+        <div class="muted small">Known for ${v.known}</div>
+        <div class="chips">${v.styles.map((s) => `<span class="badge ${v.hits.includes(s) ? 'fit' : 'who'}">${STYLE_NAMES[s]}</span>`).join('')}</div>
+        <div class="row-actions">
+          <span class="small">${prof.length ? (v.score ? `<b>Matches ${v.score} of your ${prof.length} styles</b>` : 'Not your look') : '<span class="muted">Import a board to match by style</span>'}</span>
+          <span>${v.price > alloc[catId] ? `<span class="badge over">Over by ${money(v.price - alloc[catId])}</span>` : '<span class="badge fit">In range</span>'} <button class="choice chip ${p && p.i === v.tier ? 'on' : ''}" data-cat="${catId}" data-choose="${v.tier}">${p && p.i === v.tier ? 'Added' : 'Add'}</button></span>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+function styleStrip() {
+  const prof = styleProfile();
+  if (!prof.length) return '';
+  return `<div class="style-strip"><span class="muted small">Your look from your board:</span>${prof.map((s) => `<span class="badge fit">${STYLE_NAMES[s]}</span>`).join('')}</div>`;
+}
+
 // ---------- Money helpers ----------
 
 // Free stock photos from Unsplash, loaded by link. If one fails, the tinted block shows instead.
 const photo = (id, tone) =>
-  `<span class="photo" style="background:${tone}"><img src="https://images.unsplash.com/photo-${id}?auto=format&fit=crop&w=640&q=70" alt="" loading="lazy" onerror="this.remove()"></span>`;
+  `<span class="photo" style="background:${tone}"><img src="${/^https?:/.test(id) ? id : `https://images.unsplash.com/photo-${id}?auto=format&fit=crop&w=640&q=70`}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"></span>`;
 
 const money = (n) => '$' + Math.round(n).toLocaleString('en-US');
 const round = (n, step) => Math.round(n / step) * step;
@@ -264,7 +493,7 @@ function perGuestCost() {
   return pg * region().m;
 }
 
-const COLORS = { venue: '#c62f35', food: '#e0555c', photos: '#f6969d', attire: '#ffc6ca', flowers: '#0f2742', music: '#4b6b8f', other: '#d8d3d0' };
+const COLORS = { venue: '#c62f35', food: '#e0555c', photos: '#f6969d', attire: '#ffc6ca', flowers: '#8a3a46', music: '#c98a93', other: '#e8dcd8' };
 
 // Donut chart drawn as SVG. Clicking a slice toggles that category as a priority.
 function pie(alloc) {
@@ -305,7 +534,7 @@ function nav() {
   <header class="nav"><div class="wrap">
     <button class="logo" data-go="home">${APP_NAME}</button>
     <nav class="nav-links" aria-label="Main">
-      ${state.who ? link('helper', 'My part') : `${link('home', 'Dashboard')}${link('budget', 'Budget')}${link('vendors', 'Vendors')}${link('inspo', 'Inspiration')}${link('market', 'Rentals')}${link('people', 'Helpers')}${link('picks', 'Picks')}${link('schedule', 'Schedule')}${link('all', 'Everything')}`}
+      ${state.who ? link('helper', 'My part') : `${link('home', 'Dashboard')}${link('budget', 'Budget')}${link('vendors', 'Vendors')}${link('inspo', 'Inspiration')}${link('market', 'Marketplace')}${link('people', 'Helpers')}${link('picks', 'Picks')}${link('schedule', 'Schedule')}${link('all', 'Everything')}`}
     </nav>
     <div class="nav-cta">${state.who ? '<button class="cta" data-fullview>Whole plan</button>' : state.built ? '' : '<button class="cta" data-go="budget">Set my budget</button>'}</div>
   </div></header>`;
@@ -411,7 +640,7 @@ function about() {
       <div class="card tool"><h3>Budget planner</h3><p class="muted">See where every dollar goes, priced for your guest count and your area, weighted toward what you care about most.</p><button class="link" data-go="budget">Build my budget</button></div>
       <div class="card tool"><h3>Vendors with prices up front</h3><p class="muted">Browse options that fit each part of your budget, from DIY to full service. No calling around for quotes.</p><button class="link" data-go="vendors">Browse vendors</button></div>
       <div class="card tool"><h3>Price your inspiration</h3><p class="muted">Import a Pinterest board and see what each look costs, with a DIY version and the hours it takes.</p><button class="link" data-go="inspo">Import a board</button></div>
-      <div class="card tool"><h3>Rent it, don't buy it</h3><p class="muted">Arches, tables, lights and dresses from people nearby. List your own and earn after the wedding.</p><button class="link" data-go="market">Browse rentals</button></div>
+      <div class="card tool"><h3>Buy, sell or rent it</h3><p class="muted">Arches, tables, lights and dresses from couples who just got married. Sell yours after, or rent them out.</p><button class="link" data-go="market">Browse rentals</button></div>
     </div>
     <p class="muted small">Free to use. ${APP_NAME} earns a small commission only when a rental or service is booked through the site.</p>
   </div></section>
@@ -480,7 +709,7 @@ function budgetDashboard() {
       <div class="muted small" data-bind="guestNote">${guestNote()}</div>
       <div class="stat"><span>Where</span><b>${region().name}</b></div>
       <div class="stat"><span>Planned so far</span><b>${money(planned)}</b></div>
-      ${rentals ? `<div class="stat"><span>Rentals and services</span><b>${money(rentals)}</b></div>` : ''}
+      ${rentals ? `<div class="stat"><span>Marketplace</span><b>${money(rentals)}</b></div>` : ''}
       ${hasPicks ? `<div class="stat"><span>Tax, tips and extras</span><b>${money(extras)}</b></div><div class="stat"><span>Real total</span><b>${money(real)}</b></div>` : ''}
       <div class="stat"><span>Left to plan</span><b data-bind="left">${money(state.budget - real)}</b></div>
       <div class="stat"><span>Budget per guest</span><b data-bind="perGuest">${money(state.budget / state.guests)}</b></div>
@@ -540,7 +769,12 @@ function vendors() {
         <div class="note">Your ${cur.name.toLowerCase()} budget: <b>${money(a)}</b> of ${money(state.budget)}</div>
         ${cheapest > a ? `<div class="note warn">Even the DIY route costs ${money(cheapest)} for ${state.guests} guests here. Move money into ${cur.name.toLowerCase()} on the Budget page, or trim the guest list.</div>` : ''}
         <div class="grid3">${listings}</div>
-        <div class="muted small">Sample options for this prototype. Real listings would come from local vendors.</div>
+        <div class="stack" style="margin-top:8px">
+          <div class="row"><h2>${cur.name} who match your look</h2></div>
+          ${styleStrip() || '<div class="muted small">Import a Pinterest board on the Inspiration page and vendors get ranked by how well their work matches your pins.</div>'}
+          <div class="grid3">${vendorCards(cur.id)}</div>
+          <div class="muted small">Sample vendors for this prototype. A real version reads each vendor's portfolio and Instagram tags.</div>
+        </div>
       </div>
     </div>
   </div></section>`;
@@ -549,7 +783,8 @@ function vendors() {
 function inspo() {
   const alloc = allocations();
   const m = region().m;
-  const looks = LOOKS.map((l) => {
+  const LK = currentLooks();
+  const looks = LK.map((l) => {
     let pro = 0;
     let diy = 0;
     let hours = 0;
@@ -569,16 +804,28 @@ function inspo() {
         <div class="stack"><h3>${l.title}</h3>
         <div><span class="badge ${overs.length ? 'over' : 'fit'}">${overs.length ? overs.join(', ') : 'Fits your budget'}</span></div>
         <div class="lines">${parts}</div></div>
-        <div><div class="price">${money(pro)}</div><div class="muted small">DIY version: about ${money(diy)} and ${hours} hours</div></div>
+        <div><div class="price">${money(pro)}</div><div class="muted small">DIY version: about ${money(diy)} and ${hours} hours</div>${l.url ? `<a class="link small" href="${l.url}" target="_blank" rel="noopener">Open pin</a>` : ''}</div>
       </div>
     </div>`;
   }).join('');
+  const importer = pinsOn() ? `
+    <form class="card stack" data-board-form>
+      <h3>${state.board ? 'Import a different board' : 'Import your Pinterest board'}</h3>
+      <p class="muted small">Paste the link to any public board. Each pin gets priced from the words in its title. Secret boards cannot be read.</p>
+      <div class="row-actions"><input class="search" name="url" type="url" required placeholder="https://www.pinterest.com/username/board-name/" value="${state.board ? state.board.url : ''}" style="flex:1 1 320px"><button class="primary" type="submit" ${state.importing ? 'disabled' : ''}>${state.importing ? 'Importing…' : 'Import board'}</button></div>
+      ${state.importError ? `<div class="note warn">${state.importError}</div>` : ''}
+    </form>` : `<div class="note">Real Pinterest import turns on once <code>PINTEREST_PROXY</code> is set in config.js (see backend/README.md). Until then this uses a sample board.</div>`;
+  const shown = state.board && state.board.looks.length ? `<div class="note good">${state.board.title}: ${LK.length} pins priced for ${state.guests} guests in a ${region().short}. <button class="link" data-clear-board>Remove board</button></div><div class="grid3">${looks}</div>`
+    : state.imported ? `<div class="note good">Sample board: ${LOOKS.length} looks priced for ${state.guests} guests in a ${region().short}</div><div class="grid3">${looks}</div>`
+    : `<div class="empty"><h3>No board connected yet</h3><button class="primary" data-import>Try the sample board</button></div>`;
   return `
   <section class="section"><div class="wrap stack wide">
     <div class="stack"><div class="eyebrow">Inspiration</div><h1>Price your inspiration</h1><p class="lead">Bring in a Pinterest board and see what each look costs against your budget, split across the categories it touches.</p></div>
-    ${state.imported
-      ? `<div class="note good">Board imported: ${LOOKS.length} looks priced for ${state.guests} guests in a ${region().short}</div><div class="grid3">${looks}</div>`
-      : `<div class="empty"><h3>No board connected yet</h3><button class="primary" data-import>Import a Pinterest board</button></div>`}
+    ${flash()}
+    ${importer}
+    ${styleStrip()}
+    ${shown}
+    ${styleProfile().length ? `<div class="stack"><div class="row"><h2>Vendors who do your look</h2></div><div class="grid3">${['flowers', 'photos', 'venue'].map((id) => vendorCards(id, 1)).join('')}</div><div class="muted small">Ranked by how many of your board's styles each vendor is known for. See every category on the Vendors page.</div></div>` : ''}
   </section>`;
 }
 
@@ -599,21 +846,21 @@ const MCATS = [
   { id: 'attire', name: 'Attire' },
   { id: 'services', name: 'Services' },
 ];
-// unit: "day" rents per day, "flat" is a one-off service price. Prices are for a mid-size city.
+// unit: "day" rents per day, "sale" is buy-it-outright, "flat" is a one-off service price. Prices are for a mid-size city.
 const LISTINGS = [
   { id: 'l1', title: 'Wooden ceremony arch', cat: 'decor', price: 85, unit: 'day', owner: 'Maya R.', rating: 4.9, reviews: 12, miles: 6, tone: '#CFE3D2', img: '1670529776180-60e4132ab90c' },
   { id: 'l2', title: 'Ten farmhouse tables and 80 chairs', cat: 'tables', price: 420, unit: 'day', owner: 'Oak & Pine Rentals', rating: 4.8, reviews: 31, miles: 11, tone: '#F3DDB5', img: '1519225421980-715cb0215aed' },
   { id: 'l3', title: '20 x 40 party tent, set up included', cat: 'tents', price: 350, unit: 'day', owner: 'Dan K.', rating: 4.7, reviews: 9, miles: 14, tone: '#D3E8EA', img: '1721677337543-37b07e7e28b5' },
   { id: 'l4', title: 'String lights, 300 feet with poles', cat: 'lighting', price: 60, unit: 'day', owner: 'Priya S.', rating: 5, reviews: 22, miles: 3, tone: '#E7D3E6', img: '1708569177111-40b155d78801' },
-  { id: 'l5', title: 'Linens for ten tables, ivory', cat: 'tableware', price: 90, unit: 'day', owner: 'Jess and Tom', rating: 4.6, reviews: 7, miles: 8, tone: '#F4D6CC', img: '1595467959554-9ffcbf37f10f' },
-  { id: 'l6', title: 'Gold charger plates, set of 100', cat: 'tableware', price: 75, unit: 'day', owner: 'Lena M.', rating: 4.9, reviews: 15, miles: 5, tone: '#F3DDB5' },
+  { id: 'l5', title: 'Linens for ten tables, ivory', cat: 'tableware', price: 120, unit: 'sale', owner: 'Jess and Tom', rating: 4.6, reviews: 7, miles: 8, tone: '#F4D6CC', img: '1595467959554-9ffcbf37f10f' },
+  { id: 'l6', title: 'Gold charger plates, set of 100', cat: 'tableware', price: 140, unit: 'sale', owner: 'Lena M.', rating: 4.9, reviews: 15, miles: 5, tone: '#F3DDB5' },
   { id: 'l7', title: 'Vintage lounge set, sofa and two chairs', cat: 'decor', price: 150, unit: 'day', owner: 'The Found Room', rating: 4.8, reviews: 18, miles: 9, tone: '#CFE3D2' },
   { id: 'l8', title: 'PA speaker and two wireless mics', cat: 'sound', price: 70, unit: 'day', owner: 'Marcus T.', rating: 4.7, reviews: 26, miles: 4, tone: '#D5DDF2', img: '1708569176813-746f00614012' },
   { id: 'l9', title: 'Photo booth kit with props and backdrop', cat: 'sound', price: 120, unit: 'day', owner: 'Nina P.', rating: 4.9, reviews: 11, miles: 12, tone: '#E7D3E6', img: '1617724975854-70b5d0cedb0a' },
-  { id: 'l10', title: 'Lace wedding dress, size 8, dry-cleaned', cat: 'attire', price: 140, unit: 'day', owner: 'Sofia A.', rating: 5, reviews: 4, miles: 7, tone: '#F4D6CC', img: '1550005809-91ad75fb315f' },
-  { id: 'l11', title: 'Bud vases, set of 60', cat: 'decor', price: 40, unit: 'day', owner: 'Maya R.', rating: 4.9, reviews: 12, miles: 6, tone: '#CFE3D2', img: '1629141731648-0bce61cf4f7e' },
+  { id: 'l10', title: 'Lace wedding dress, size 8, worn once', cat: 'attire', price: 450, unit: 'sale', owner: 'Sofia A.', rating: 5, reviews: 4, miles: 7, tone: '#F4D6CC', img: '1550005809-91ad75fb315f' },
+  { id: 'l11', title: 'Bud vases, set of 60', cat: 'decor', price: 55, unit: 'sale', owner: 'Maya R.', rating: 4.9, reviews: 12, miles: 6, tone: '#CFE3D2', img: '1629141731648-0bce61cf4f7e' },
   { id: 'l12', title: 'Chiavari chairs, set of 100', cat: 'tables', price: 300, unit: 'day', owner: 'Oak & Pine Rentals', rating: 4.8, reviews: 31, miles: 11, tone: '#F3DDB5' },
-  { id: 'l13', title: 'Donut wall and cake stand set', cat: 'decor', price: 35, unit: 'day', owner: 'Kai W.', rating: 4.5, reviews: 6, miles: 10, tone: '#F3DDB5', img: '1555244162-803834f70033' },
+  { id: 'l13', title: 'Donut wall and cake stand set', cat: 'decor', price: 60, unit: 'sale', owner: 'Kai W.', rating: 4.5, reviews: 6, miles: 10, tone: '#F3DDB5', img: '1555244162-803834f70033' },
   { id: 'l14', title: 'Student photographer, 4 hours', cat: 'services', price: 350, unit: 'flat', owner: 'Elliot B.', rating: 4.8, reviews: 9, miles: 5, tone: '#D5DDF2', img: '1519741196428-6a2175fa2557' },
   { id: 'l15', title: 'DJ with own gear, 5 hours', cat: 'services', price: 400, unit: 'flat', owner: 'Andre L.', rating: 4.7, reviews: 14, miles: 9, tone: '#D3E8EA', img: '1708569177086-2710ef4b1620' },
   { id: 'l16', title: 'Home baker: three-tier cake, serves 80', cat: 'services', price: 280, unit: 'flat', owner: 'Rosa G.', rating: 5, reviews: 21, miles: 6, tone: '#F3DDB5' },
@@ -623,12 +870,12 @@ const LISTINGS = [
 // What the couple will own after the wedding, guessed from their picks. One tap lists it all.
 function resaleItems() {
   const tier = (id) => (state.chosen[id] ? state.chosen[id].i : -1);
-  const items = [{ title: 'Decor bundle: signs, candles, table numbers', cat: 'decor', price: 45 }];
-  if (tier('flowers') >= 0 && tier('flowers') <= 1) items.push({ title: 'Bud vases and arrangement supplies', cat: 'decor', price: 40 });
-  if (tier('venue') === 0) items.push({ title: 'String lights and tent poles', cat: 'lighting', price: 60 });
-  if (tier('venue') <= 1 && tier('venue') >= 0) items.push({ title: 'Wooden ceremony arch', cat: 'decor', price: 85 });
-  if (tier('attire') >= 2) items.push({ title: 'Wedding dress, dry-cleaned', cat: 'attire', price: 140 });
-  if (tier('music') <= 1 && tier('music') >= 0) items.push({ title: 'Bluetooth speaker and mic', cat: 'sound', price: 50 });
+  const items = [{ title: 'Decor bundle: signs, candles, table numbers', cat: 'decor', price: 70, unit: 'sale' }];
+  if (tier('flowers') >= 0 && tier('flowers') <= 1) items.push({ title: 'Bud vases and arrangement supplies', cat: 'decor', price: 55, unit: 'sale' });
+  if (tier('venue') === 0) items.push({ title: 'String lights and tent poles', cat: 'lighting', price: 60, unit: 'day' });
+  if (tier('venue') <= 1 && tier('venue') >= 0) items.push({ title: 'Wooden ceremony arch', cat: 'decor', price: 85, unit: 'day' });
+  if (tier('attire') >= 2) items.push({ title: 'Wedding dress, worn once', cat: 'attire', price: 450, unit: 'sale' });
+  if (tier('music') <= 1 && tier('music') >= 0) items.push({ title: 'Bluetooth speaker and mic', cat: 'sound', price: 50, unit: 'day' });
   return items;
 }
 
@@ -661,9 +908,9 @@ function listingCard(l) {
         <div class="small">${stars} · ${l.owner}</div>
       </div>
       <div class="stack">
-        <div><span class="price">${money(renterPays(l))}</span><span class="muted small"> ${l.unit === 'day' ? 'per day' : 'flat'}</span></div>
+        <div><span class="price">${money(renterPays(l))}</span><span class="muted small"> ${(l.unit === 'day' ? 'per day' : l.unit === 'sale' ? 'to buy' : 'flat')}</span></div>
         <div class="muted small">${money(listingPrice(l))} asked + ${Math.round(RENTER_FEE * 100)}% service fee</div>
-        ${l.mine ? `<button class="link" data-unlist="${l.id}">Remove my listing</button>` : `<button class="choice ${on ? 'on' : ''}" data-rent="${l.id}">${on ? 'Added to budget' : 'Add to budget'}</button>`}
+        ${l.mine ? `<button class="link" data-unlist="${l.id}">Remove my listing</button>` : `<button class="choice ${on ? 'on' : ''}" data-rent="${l.id}">${on ? 'Added to budget' : l.unit === 'sale' ? 'Buy, add to budget' : l.unit === 'day' ? 'Rent, add to budget' : 'Book, add to budget'}</button>`}
       </div>
     </div>
   </div>`;
@@ -694,19 +941,19 @@ function listForm() {
   const mine = state.listings.filter((l) => l.mine);
   const earn = (l) => ownerGets(l);
   const mineRows = mine.map((l) => `
-    <div class="line"><span>${l.title}<span class="muted small"> · ${money(listingPrice(l))} ${l.unit === 'day' ? 'per day' : 'flat'}</span></span><b>${money(earn(l))} per booking</b></div>`).join('');
+    <div class="line"><span>${l.title}<span class="muted small"> · ${money(listingPrice(l))} ${(l.unit === 'day' ? 'per day' : l.unit === 'sale' ? 'to buy' : 'flat')}</span></span><b>${money(earn(l))} per booking</b></div>`).join('');
   const yearly = mine.reduce((t, l) => t + earn(l) * 8, 0);
   return `
   <div class="two-col">
     <div class="main">
       <form class="card stack" data-list-form>
-        <h3>List an item or a service</h3>
-        <p class="muted small">Takes a minute. You set the price, we handle booking and payment, and you keep ${Math.round((1 - OWNER_CUT) * 100)}%.</p>
+        <h3>Sell it, rent it out, or offer a service</h3>
+        <p class="muted small">Takes a minute. You set the price, we handle payment and pickup, and you keep ${Math.round((1 - OWNER_CUT) * 100)}%.</p>
         <label class="field"><span>What is it?</span><input name="title" required maxlength="70" placeholder="Wooden ceremony arch"></label>
         <div class="grid-auto">
           <label class="field"><span>Category</span><select name="cat">${cats}</select></label>
           <label class="field"><span>Price</span><div class="money-input"><span>$</span><input name="price" type="number" min="5" max="5000" step="5" required inputmode="numeric" placeholder="85"></div></label>
-          <label class="field"><span>Priced</span><select name="unit"><option value="day">per day</option><option value="flat">flat, one-off</option></select></label>
+          <label class="field"><span>Priced</span><select name="unit"><option value="sale">for sale</option><option value="day">for rent, per day</option><option value="flat">a service, flat price</option></select></label>
         </div>
         <label class="field"><span>Your name or business</span><input name="owner" maxlength="40" placeholder="Maya R."></label>
         <div class="muted small" data-bind="earnNote">Type a price to see what you would earn.</div>
@@ -729,19 +976,22 @@ function listForm() {
 function market() {
   const tab = state.market.tab === 'list' ? 'list' : 'browse';
   const cat = state.market.cat || 'all';
-  const items = allListings().filter((l) => cat === 'all' || l.cat === cat);
+  const kind = state.market.kind || 'all';
+  const items = allListings().filter((l) => (cat === 'all' || l.cat === cat) && (kind === 'all' || l.unit === kind));
+  const kinds = [['all', 'Everything'], ['sale', 'For sale'], ['day', 'For rent'], ['flat', 'Services']].map(([k, n]) => `<button class="choice chip ${kind === k ? 'on' : ''}" data-mkind="${k}">${n}</button>`).join('');
   const chips = [{ id: 'all', name: 'All' }].concat(MCATS).map((m) =>
     `<button class="choice chip ${cat === m.id ? 'on' : ''}" data-mcat="${m.id}">${m.name}</button>`).join('');
   const booked = allListings().filter((l) => state.rentals[l.id]);
   return `
   <section class="section"><div class="wrap stack wide">
-    <div class="stack"><div class="eyebrow">Rentals and services</div><h1>Borrow it from someone nearby</h1><p class="lead">Arches, tables, lights, dresses and helpers, listed by people and small businesses near you. Rent it for the day instead of buying it.</p></div>
+    <div class="stack"><div class="eyebrow">Marketplace</div><h1>Buy it, sell it, or rent it from a couple nearby</h1><p class="lead">Arches, tables, lights, dresses and helpers, listed by couples who just got married and small businesses near you. Buy it secondhand, rent it for the day, and sell it all back when you are done.</p></div>
     ${flash()}
     <div class="toggle" role="tablist"><button class="${tab === 'browse' ? 'on' : ''}" data-mtab="browse">Find something</button><button class="${tab === 'list' ? 'on' : ''}" data-mtab="list">List something</button></div>
     ${tab === 'list' ? listForm() : `
     <div class="two-col">
       <div class="main">
         <input class="search" type="search" placeholder="Search arches, chairs, lights, DJ..." value="${state.market.q || ''}" data-market-q aria-label="Search listings">
+        <div class="chips">${kinds}</div>
         <div class="chips">${chips}</div>
         <div class="muted small" data-bind="marketCount">${items.length} listing${items.length === 1 ? '' : 's'} within 15 miles</div>
         <div class="grid3" data-market-grid>${items.map(listingCard).join('')}</div>
@@ -775,13 +1025,13 @@ function filterMarket() {
 // Each person has an agreement: the items they cover, a cap (or none), and the tasks they own.
 // "Mom covers catering up to $4,000 and no more." Anything over the cap falls back to the couple.
 const ROLES = ['Mom', 'Dad', "Partner's mom", "Partner's dad", 'Sibling', 'Grandparent', 'Friend', 'Other'];
-const COVERABLE = () => CATS.map((c) => ({ id: c.id, name: c.name })).concat(LINES.map((l) => ({ id: l.id, name: l.name })), [{ id: 'rentals', name: 'Rentals and services' }]);
+const COVERABLE = () => CATS.map((c) => ({ id: c.id, name: c.name })).concat(LINES.map((l) => ({ id: l.id, name: l.name })), [{ id: 'rentals', name: 'Marketplace' }]);
 const personById = (id) => state.people.find((p) => p.id === id);
 const initials = (name) => name.trim().split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
 
 // What one covered item costs right now: the pick if there is one, otherwise the budgeted amount.
 function itemCost(id, alloc) {
-  if (id === 'rentals') return { cost: rentalsTotal(), est: false, name: 'Rentals and services' };
+  if (id === 'rentals') return { cost: rentalsTotal(), est: false, name: 'Marketplace' };
   const c = CATS.find((x) => x.id === id);
   if (c) { const p = pickOf(c); return p ? { cost: p.price, est: false, name: c.name, detail: p.label } : { cost: alloc[c.id], est: true, name: c.name, detail: 'nothing picked yet' }; }
   const l = LINES.find((x) => x.id === id);
@@ -961,6 +1211,8 @@ function dash() {
       </div>
       <div class="row-actions"><button class="ghost" data-share>Share dashboard</button><button class="ghost" data-export>Export to Excel</button><button class="primary" data-go="people">Add a helper</button></div>
     </div>
+    ${cloudOn() ? (cloud.owner() ? `<div class="cloud-bar"><span class="cloud-status ok" data-bind="cloudStatus">${cloud.statusText()}</span><span class="muted small">Plan code <b>${state.cloudCode}</b>. Helpers' answers show up here automatically.</span><button class="link small" data-private-link>Copy my private link for another device</button></div>`
+      : `<div class="cloud-bar"><span class="muted small">Saved on this device only.</span><button class="ghost" data-sync>Sync to the cloud</button><span class="muted small">Short share links, helpers' answers come back, works on your phone too.</span></div>`) : ''}
     ${flash()}
     ${state.built ? '' : `<div class="note gold">This is a sample ${money(state.budget)} wedding for ${state.guests} guests so you can see how it works. <button class="link" data-go="budget">Set your own budget, guests and priorities</button> or <button class="link" data-sample>fill it with sample picks</button>.</div>`}
     ${state.share && !state.shareWho ? `<input class="share-url" type="text" readonly value="${state.share}" aria-label="Share link" onfocus="this.select()">` : ''}
@@ -975,7 +1227,7 @@ function dash() {
         <div class="lines">
           <div class="line"><span>Budget</span><b data-bind="budget">${money(state.budget)}</b></div>
           <div class="line"><span>Picks</span><b>${money(planned)}</b></div>
-          <div class="line"><span>Rentals and services</span><b>${money(rentals)}</b></div>
+          <div class="line"><span>Marketplace</span><b>${money(rentals)}</b></div>
           <div class="line"><span>Tax, tips and extras</span><b>${money(extras)}</b></div>
           <div class="line"><span>${over ? 'Over budget' : 'Left to plan'}</span><b class="${over ? 'bad' : ''}" data-bind="left">${money(Math.abs(state.budget - real))}</b></div>
           ${dep.held ? `<div class="line"><span>Deposits held safely</span><b>${money(dep.held)}</b></div>` : ''}
@@ -1018,16 +1270,17 @@ function dash() {
         ${hidden.length ? `<div class="line"><span>Reality check</span><b>${money(extras)}</b></div><div class="muted small">${hidden.map((h) => `${h.name} ${money(h.amount)}`).join(' · ')}</div>` : ''}
       </div>
       <div class="card stack">
-        <div class="row"><span>Rentals</span><button class="link small" data-go="market">Marketplace</button></div>
+        <div class="row"><span>Marketplace</span><button class="link small" data-go="market">Browse</button></div>
         ${booked.length ? `<div class="lines">${booked.map((l) => `<div class="line"><span>${l.title}</span><span><b>${money(renterPays(l))}</b> <button class="link small" data-rent="${l.id}">Remove</button></span></div>`).join('')}</div>` : '<p class="muted small">Nothing booked. Rent the arch instead of buying it.</p>'}
         <div class="stat"><span>Booked</span><b>${money(rentals)}</b></div>
         ${state.listings.length ? `<div class="muted small">You have ${state.listings.length} listing${state.listings.length > 1 ? 's' : ''} earning after the wedding.</div>` : ''}
         <div class="row small" style="margin-top:6px"><span>After the wedding</span></div>
-        ${state.resold ? `<p class="muted small">Your wedding gear is listed. Each booking pays you ${Math.round((1 - OWNER_CUT) * 100)}% of the price.</p>` : `<p class="muted small">${resaleItems().length} item${resaleItems().length === 1 ? '' : 's'} you will own, worth about ${money(resaleItems().reduce((t, r) => t + r.price * (1 - OWNER_CUT) * 8, 0))} a year rented out.</p><button class="ghost" data-resale>List what I bought</button>`}
+        ${state.resold ? `<p class="muted small">Your wedding gear is listed. Each booking pays you ${Math.round((1 - OWNER_CUT) * 100)}% of the price.</p>` : `<p class="muted small">${resaleItems().length} item${resaleItems().length === 1 ? '' : 's'} you will own. Sell the small stuff, rent out the big stuff: about ${money(resaleItems().reduce((t, r) => t + r.price * (1 - OWNER_CUT) * (r.unit === 'day' ? 8 : 1), 0))} back.</p><button class="ghost" data-resale>List what I bought</button>`}
       </div>
       <div class="card stack">
         <div class="row"><span>Inspiration</span><button class="link small" data-go="inspo">Board</button></div>
-        ${state.imported ? `<div class="lines">${LOOKS.slice(0, 4).map((l) => { const m = region().m; const pro = l.parts.reduce((t, pt) => t + round((pt.pro[0] + pt.pro[1] * state.guests) * m, 25), 0); const diy = l.parts.reduce((t, pt) => t + round((pt.diy[0] + pt.diy[1] * state.guests) * m, 25), 0); return `<div class="line"><span>${l.title}<span class="muted small"> · DIY ${money(diy)}</span></span><b>${money(pro)}</b></div>`; }).join('')}</div>` : '<p class="muted small">No board connected. Import a Pinterest board and every look gets a price.</p><button class="ghost" data-import>Import a Pinterest board</button>'}
+        ${styleStrip()}
+        ${state.imported || state.board ? `<div class="lines">${currentLooks().slice(0, 4).map((l) => { const m = region().m; const pro = l.parts.reduce((t, pt) => t + round((pt.pro[0] + pt.pro[1] * state.guests) * m, 25), 0); const diy = l.parts.reduce((t, pt) => t + round((pt.diy[0] + pt.diy[1] * state.guests) * m, 25), 0); return `<div class="line"><span>${l.title}<span class="muted small"> · DIY ${money(diy)}</span></span><b>${money(pro)}</b></div>`; }).join('')}</div>` : '<p class="muted small">No board connected. Import a Pinterest board and every look gets a price.</p><button class="ghost" data-import>Import a Pinterest board</button>'}
       </div>
     </div>
 
@@ -1060,7 +1313,7 @@ function pitch() {
     <div class="note">A typical $15,000 wedding that books $9,000 of vendors and rents $450 of gear through the site earns about <b>$790</b>, plus $39 if they go Plus. Nothing is charged to the couple for planning.</div>
     <div class="grid3">
       <div class="card tool"><div class="eyebrow">Deposits in escrow</div><h3>Why vendors pay us</h3><p class="muted">Couples reserve with a ${Math.round(DEPOSIT * 100)}% deposit we hold until the day. Vendors get a guaranteed booking and pay ${Math.round(VENDOR_FEE * 100)}% only on jobs that happen, not a monthly listing fee.</p></div>
-      <div class="card tool"><div class="eyebrow">Resale loop</div><h3>Supply from our own couples</h3><p class="muted">The day after, one tap lists the arch, vases and dress for rent, priced from their picks. We earn commission a second time on the same goods.</p></div>
+      <div class="card tool"><div class="eyebrow">Resale loop</div><h3>Supply from our own couples</h3><p class="muted">The day after, one tap lists the arch, vases and dress to sell or rent, priced from their picks. The next couple buys secondhand, and we earn commission a second time on the same goods.</p></div>
       <div class="card tool"><div class="eyebrow">Helper links</div><h3>Every helper is a new user</h3><p class="muted">Mom opens her link, sees the plan works, and starts her anniversary party from the same page. Zero-cost acquisition nobody else has.</p></div>
     </div>
   </div></section>`;
@@ -1072,7 +1325,7 @@ const TOUR = [
   { id: 'budget', name: 'Budget planner', blurb: 'Set a total, guests and region. Priorities get 1.5x. Sliders rebalance the rest. Smaller lines are named, not hidden.', render: () => (state.built ? budgetDashboard() : budgetSetup()) },
   { id: 'vendors', name: 'Vendors with prices up front', blurb: 'Real sample prices per guest and per region, DIY to full service, with hours and helpers for the DIY route.', render: vendors },
   { id: 'inspo', name: 'Price your inspiration', blurb: 'A Pinterest board priced across the categories each look touches, with a DIY cost and hours.', render: inspo },
-  { id: 'market', name: 'Rentals marketplace', blurb: 'Peer-to-peer rentals and services. Free to list and browse. We earn a 10% commission plus a 5% service fee per booking.', render: market },
+  { id: 'market', name: 'Marketplace: buy, sell, rent', blurb: 'Couples sell or rent out what they bought, the next couple buys or rents it. Free to list and browse. We earn a 10% commission plus a 5% service fee per sale or booking.', render: market },
   { id: 'people', name: 'Helpers and agreements', blurb: 'Add Mom, pick what she covers, cap it, assign tasks, and send her a link that shows only her part with a yes button.', render: people },
   { id: 'picks', name: 'My picks and the reality check', blurb: 'Everything chosen, plus tax, tips, fees, alterations, vendor meals and overage. Share by link or Excel.', render: picks },
   { id: 'schedule', name: 'Schedule, calendar and countdown', blurb: 'Countdown, four planning phases, and a month calendar with every task on its due date. Compresses for short timelines.', render: schedule },
@@ -1145,6 +1398,7 @@ function picks() {
       <div class="side-actions">
         <div class="price">${money(p.price)}</div>
         ${p.i === 0 ? '' : `<button class="choice chip ${state.chosen[c.id].deposit ? 'on' : ''}" data-deposit="${c.id}">${state.chosen[c.id].deposit ? `Deposit ${money(p.price * DEPOSIT)} held` : `Reserve with ${Math.round(DEPOSIT * 100)}% deposit`}</button>`}
+        ${p.i !== 0 && state.chosen[c.id].deposit && stripeOn() ? `<a class="link small" href="${CFG.STRIPE_DEPOSIT_LINK}" target="_blank" rel="noopener">Pay the ${money(p.price * DEPOSIT)} deposit (test card 4242…)</a>` : ''}
         <button class="ghost" data-cat="${c.id}" data-go="vendors">Change</button>
         <button class="link" data-remove="${c.id}">Remove</button>
       </div>
@@ -1162,7 +1416,7 @@ function picks() {
         ${have.length ? rows : `<div class="empty"><h3>Nothing added yet</h3><p class="muted">Add options from the Vendors page and they show up here.</p><button class="primary" data-go="vendors">Browse vendors</button></div>`}
         ${booked.length ? `
         <div class="card stack">
-          <div class="row"><span>Rentals and services</span><span>${money(rentals)}</span></div>
+          <div class="row"><span>Marketplace</span><span>${money(rentals)}</span></div>
           <p class="muted small">Booked from people nearby. Service fee included. Counts against your decor and rentals line of ${money(alloc.lines.decor)}.</p>
           <div class="lines">${booked.map((l) => `<div class="line"><span>${l.title}<span class="muted small"> · ${l.owner}</span></span><span><b>${money(renterPays(l))}</b> <button class="link small" data-rent="${l.id}">Remove</button></span></div>`).join('')}</div>
         </div>` : ''}
@@ -1180,7 +1434,7 @@ function picks() {
           <div class="big">${money(real)}</div>
           <div class="muted small">real total with tax, tips and extras</div>
           <div class="stat"><span>Picks</span><b>${money(planned)}</b></div>
-          ${rentals ? `<div class="stat"><span>Rentals and services</span><b>${money(rentals)}</b></div>` : ''}
+          ${rentals ? `<div class="stat"><span>Marketplace</span><b>${money(rentals)}</b></div>` : ''}
           <div class="stat"><span>Tax, tips and extras</span><b>${money(extras)}</b></div>
           <div class="stat"><span>Total budget</span><b>${money(state.budget)}</b></div>
           <div class="stat"><span>Left to plan</span><b class="${state.budget - real < 0 ? 'bad' : ''}">${money(state.budget - real)}</b></div>
@@ -1502,7 +1756,7 @@ function exportExcel() {
     ['Where', region().name],
     ['Total budget', state.budget],
     ['Planned so far', planned],
-    ['Rentals and services', rentals],
+    ['Marketplace', rentals],
     ['Tax, tips and extras', extras],
     ['Real total', null],
     ['Left to plan', null],
@@ -1528,7 +1782,7 @@ function exportExcel() {
   const ps = XLSX.utils.aoa_to_sheet(peopleRows);
   for (let r = 2; r <= peopleRows.length; r++) ['D', 'E', 'F'].forEach((col) => { if (ps[col + r]) ps[col + r].z = usd; });
   ps['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 40 }, { wch: 10 }, { wch: 14 }, { wch: 10 }, { wch: 30 }, { wch: 10 }];
-  XLSX.utils.book_append_sheet(wb, rs, 'Rentals');
+  XLSX.utils.book_append_sheet(wb, rs, 'Marketplace');
   XLSX.utils.book_append_sheet(wb, ps, 'Who pays');
   XLSX.utils.book_append_sheet(wb, summary, 'Summary');
   XLSX.writeFile(wb, 'wedding-budget.xlsx');
@@ -1569,13 +1823,25 @@ app.addEventListener('click', (e) => {
   if (d.reset !== undefined) { state.custom = null; }
   if (d.resale !== undefined) {
     const items = resaleItems();
-    items.forEach((r, i) => state.listings.push({ id: 'r' + Date.now() + i, title: r.title, cat: r.cat, price: r.price, unit: 'day', owner: 'You', rating: 0, reviews: 0, miles: 0, tone: '#E7D3E6', mine: true }));
+    items.forEach((r, i) => state.listings.push({ id: 'r' + Date.now() + i, title: r.title, cat: r.cat, price: r.price, unit: r.unit, owner: 'You', rating: 0, reviews: 0, miles: 0, tone: '#E7D3E6', mine: true }));
     state.resold = true;
-    state.flash = `${items.length} item${items.length === 1 ? '' : 's'} listed on the marketplace. At 8 bookings a year that is about ${money(items.reduce((t, r) => t + r.price * (1 - OWNER_CUT) * 8, 0))} back.`;
+    state.flash = `${items.length} item${items.length === 1 ? '' : 's'} listed on the marketplace. Sold once and rented 8 times a year, that is about ${money(items.reduce((t, r) => t + r.price * (1 - OWNER_CUT) * (r.unit === 'day' ? 8 : 1), 0))} back.`;
   }
   if (d.deposit) { const ch = state.chosen[d.deposit]; if (ch) { ch.deposit = !ch.deposit; state.flash = ch.deposit ? `Deposit held by ${APP_NAME} until the day. The vendor pays our ${Math.round(VENDOR_FEE * 100)}% fee. You pay nothing extra.` : ''; } }
   if (d.cat) { state.cat = d.cat; }
   if (d.step !== undefined) { const n = Number(d.step); state.step = (state.step === n && state.page === 'home' && !el.classList.contains('primary') && !el.classList.contains('ghost')) ? null : n; if (state.page !== 'home') state.page = 'home'; }
+  if (d.sync !== undefined) {
+    cloud.publish().then(() => { cloud.status = 'saved'; state.flash = 'Synced. Your share links are short now, and helpers\' answers will come back to you.'; save(); cloud.startPolling(); render(); })
+      .catch((e) => { state.flash = 'Could not sync: ' + e.message + '. Did you run backend/supabase.sql?'; render(); });
+    return;
+  }
+  if (d.privateLink !== undefined) {
+    state.share = `${location.origin}${location.pathname}?plan=${state.cloudCode}&key=${state.editKey}`; state.shareWho = null;
+    state.flash = 'Private link copied. Anyone with it can edit, so only send it to your partner.';
+    const copy = navigator.clipboard ? navigator.clipboard.writeText(state.share) : Promise.reject();
+    copy.catch(() => { state.flash = 'Copy the private link below. Anyone with it can edit.'; render(); });
+  }
+  if (d.clearBoard !== undefined) { state.board = null; }
   if (d.expand) { state.open[d.expand] = !state.open[d.expand]; }
   if (d.expandOnly) { state.open[d.expandOnly] = true; }
   if (d.showOver) { state.showOver[d.showOver] = !state.showOver[d.showOver]; }
@@ -1589,6 +1855,7 @@ app.addEventListener('click', (e) => {
   if (d.export !== undefined) { exportExcel(); return; }
   if (d.remove) { delete state.chosen[d.remove]; }
   if (d.task) { state.done[d.task] = !state.done[d.task]; }
+  if ((d.task || d.accept) && state.who && cloudOn() && state.cloudCode) { cloud.respond(state.who).catch((e) => { state.flash = 'Could not send: ' + e.message; render(); }); }
   if (d.share !== undefined) {
     state.share = shareLink(); state.shareWho = null;
     state.flash = 'Link copied. Send it to anyone who is helping pay.';
@@ -1611,12 +1878,13 @@ app.addEventListener('click', (e) => {
     const copy = navigator.clipboard ? navigator.clipboard.writeText(state.share) : Promise.reject();
     copy.catch(() => { state.flash = `Copy the link under ${p.name}'s card and send it to them.`; render(); });
   }
-  if (d.accept) { const p = personById(d.accept); if (p) p.accepted = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); state.flash = 'Saved on this device. The couple will see it when this syncs in the real version.'; }
+  if (d.accept) { const p = personById(d.accept); if (p) p.accepted = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); state.flash = cloudOn() && state.cloudCode ? 'Sent to the couple. Thank you.' : 'Saved on this device. The couple will see it when this syncs in the real version.'; }
   if (d.ownplan !== undefined) { Object.assign(state, fresh()); state.flash = 'Fresh plan. Set your number to start.'; state.page = 'budget'; }
   if (d.fullview !== undefined) { state.who = null; state.page = 'home'; }
   if (d.sample !== undefined) { loadSample(); state.flash = 'Sample wedding loaded. Scroll down to see every feature filled in.'; }
   if (d.mtab) { state.market.tab = d.mtab; }
   if (d.mcat) { state.market.cat = d.mcat; }
+  if (d.mkind) { state.market.kind = d.mkind; }
   if (d.rent) { if (state.rentals[d.rent]) delete state.rentals[d.rent]; else state.rentals[d.rent] = true; }
   if (d.unlist) { state.listings = state.listings.filter((l) => l.id !== d.unlist); delete state.rentals[d.unlist]; }
   if (d.cal) { const [y, m] = state.calMonth.split('-').map(Number); const dt = new Date(y, m - 1 + Number(d.cal), 1); state.calMonth = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`; }
@@ -1692,6 +1960,16 @@ app.addEventListener('input', (e) => {
 });
 
 app.addEventListener('submit', (e) => {
+  const bf = e.target.closest('[data-board-form]');
+  if (bf) {
+    e.preventDefault();
+    const url = String(new FormData(bf).get('url') || '').trim();
+    if (!url) return;
+    state.importing = true; state.importError = ''; render();
+    importBoard(url).then((board) => { state.board = board; state.imported = true; state.importing = false; state.flash = `${board.looks.length} pins imported from ${board.title}.`; render(); })
+      .catch((err) => { state.importing = false; state.importError = err.message; render(); });
+    return;
+  }
   const pf = e.target.closest('[data-person-form]');
   if (pf) {
     e.preventDefault();
@@ -1730,3 +2008,4 @@ app.addEventListener('change', (e) => {
 
 load();
 render();
+cloud.boot();

@@ -32,12 +32,16 @@ Then open http://localhost:5173 in your browser. Press Ctrl + C in the terminal 
 - Smaller lines: cake, invitations, decor, rings and officiant are named lines instead of a hidden "everything else".
 - Reality check: My picks adds tax, tips, fees, alterations, vendor meals and a 5% overage to show the real total.
 - DIY time cost: DIY options show hours and helpers needed; the schedule's DIY task totals them.
-- Inspiration: each look is priced across the categories it touches, with a DIY cost and hours.
+- Inspiration: each look is priced across the categories it touches, with a DIY cost and hours. With the Pinterest worker set up, any public board imports for real. Pin titles build a style profile (boho, garden, classic...) and vendors are ranked by how well their work matches it.
 - Schedule: a countdown (days, months, weeks), a four-phase progress strip, and a month calendar with every task on its due date. Switch to the checklist view for the grouped list. If the date is under 12 months out, the plan is compressed to fit.
 - Saving: progress is stored in the browser. "Copy share link" on My picks makes a link that opens the same plan anywhere. "Start over" in the footer clears it.
-- Rentals marketplace: peer-to-peer listings for arches, tables, tents, lights, linens, sound gear, dresses and local services. Filter by category, search, and add items to the budget. Anyone can list an item with a live earnings estimate.
+- Marketplace: buy, sell and rent. Peer-to-peer listings for arches, tables, tents, lights, linens, sound gear, dresses and local services. Filter by category, search, and add items to the budget. Anyone can list an item with a live earnings estimate.
 - Business model: free to browse and list. The owner pays a 10% commission and the renter a 5% service fee on each booking. The numbers are `OWNER_CUT` and `RENTER_FEE` in `app.js`, and the page shows the split on an example listing.
 - Export: Excel file with Budget, Hidden costs, Rentals and Summary sheets.
+
+## Backend (optional)
+
+See `backend/README.md`. Three independent pieces: Supabase for cloud sync and helper replies, a Cloudflare Worker for real Pinterest import, and a Stripe test payment link for deposits. Keys go in `config.js`. With nothing filled in, everything works on one device.
 
 ## Files
 
@@ -45,3 +49,5 @@ Then open http://localhost:5173 in your browser. Press Ctrl + C in the terminal 
 - `styles.css`: all the styling (colors are at the top)
 - `app.js`: the screens, sample data and click handling. Set `APP_NAME` at the top. Prices live in `CATS`, `LINES`, `REGIONS` and `LOOKS` near the top.
 - `xlsx.full.min.js`: the SheetJS library that writes the Excel export. No need to edit it.
+- `config.js`: backend keys (blank by default).
+- `backend/`: the Supabase schema, the Pinterest worker, and setup steps.
